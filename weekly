@@ -1,3 +1,15 @@
+import builtins
+import sys
+import os
+
+if not getattr(builtins.print, '_patched_flush', False):
+    _original_print = builtins.print
+    def print(*args, **kwargs):
+        kwargs.setdefault('flush', True)
+        _original_print(*args, **kwargs)
+    print._patched_flush = True
+    builtins.print = print
+
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from zenv import get_zdkit_env
@@ -7,7 +19,6 @@ import json
 import time
 import re
 import uuid
-import os
 import tempfile
 import traceback
 
@@ -290,10 +301,10 @@ def build_weekly_note_title(week_info, project_name):
     return f"{year}#W{week_number:02d} {project_name}周报"
 
 
-def build_debug_note_title(week_info, project_name, debug_type):
-    year = week_info["start_date"][:4]
-    week_number = week_info["week_number"]
-    return f"{year}#{week_number} {project_name}周报调试-{debug_type}"
+# def build_debug_note_title(week_info, project_name, debug_type):
+#     year = week_info["start_date"][:4]
+#     week_number = week_info["week_number"]
+#     return f"{year}#{week_number} {project_name}周报调试-{debug_type}"
 
 
 def build_text_block(block_type, text, mentions=None):
@@ -597,48 +608,48 @@ def aggregate_weekly_json(parsed_note_entries):
     }
 
 
-def build_debug_markdown_from_weekly_json(project_name, weekly_json):
-    metadata = weekly_json.get("metadata", {})
-    users = weekly_json.get("users", [])
-    source_urls = metadata.get("source_urls", {})
-    range_dates = metadata.get("range_dates", [])
-    week_number = metadata.get("week_number", "")
+# def build_debug_markdown_from_weekly_json(project_name, weekly_json):
+#     metadata = weekly_json.get("metadata", {})
+#     users = weekly_json.get("users", [])
+#     source_urls = metadata.get("source_urls", {})
+#     range_dates = metadata.get("range_dates", [])
+#     week_number = metadata.get("week_number", "")
 
-    start_date = range_dates[0] if range_dates else ""
-    end_date = range_dates[-1] if range_dates else ""
+#     start_date = range_dates[0] if range_dates else ""
+#     end_date = range_dates[-1] if range_dates else ""
 
-    parts = [
-        f"# 📊 {project_name} 周报原始聚合调试",
-        f"**日期范围：** {start_date} 至 {end_date} | **周数：** 第 {week_number} 周",
-        "**源日报链接：**"
-    ]
+#     parts = [
+#         f"# 📊 {project_name} 周报原始聚合调试",
+#         f"**日期范围：** {start_date} 至 {end_date} | **周数：** 第 {week_number} 周",
+#         "**源日报链接：**"
+#     ]
 
-    for report_date in sorted(source_urls.keys()):
-        source_url = source_urls.get(report_date, "")
-        parts.append(f"- {report_date}: [{source_url}]({source_url})")
+#     for report_date in sorted(source_urls.keys()):
+#         source_url = source_urls.get(report_date, "")
+#         parts.append(f"- {report_date}: [{source_url}]({source_url})")
 
-    parts.append("")
-    parts.append("---")
-    parts.append("")
+#     parts.append("")
+#     parts.append("---")
+#     parts.append("")
     
 
-    for user in users:
-        parts.append(f"## 👤 {mention_to_markdown(user.get('user_name'))}")
-        for report in user.get("reports", []):
-            parts.append(f"### {report.get('date', '')}")
-            content = report.get("content", "").strip()
-            if content:
-                for line in content.splitlines():
-                    line = line.strip()
-                    if line:
-                        parts.append(f"- {line}")
-            else:
-                parts.append("- （当日无正文内容）")
-            parts.append("")
-        parts.append("---")
-        parts.append("")
+#     for user in users:
+#         parts.append(f"## 👤 {mention_to_markdown(user.get('user_name'))}")
+#         for report in user.get("reports", []):
+#             parts.append(f"### {report.get('date', '')}")
+#             content = report.get("content", "").strip()
+#             if content:
+#                 for line in content.splitlines():
+#                     line = line.strip()
+#                     if line:
+#                         parts.append(f"- {line}")
+#             else:
+#                 parts.append("- （当日无正文内容）")
+#             parts.append("")
+#         parts.append("---")
+#         parts.append("")
 
-    return "\n".join(parts)
+#     return "\n".join(parts)
 
 
 def step1_weekly_summary_note(project):
@@ -837,7 +848,7 @@ def call_workflow_model(message_id, llm_name, llm_params, context_messages):
     return poll_workflow_result(task_message_id)
 
 
-def _call_llm_with_retry(llm_name, llm_params, context_messages, max_retries=10):
+def _call_llm_with_retry(llm_name, llm_params, context_messages, max_retries=20):
     attempt = 0
     last_error = None
 
@@ -1058,34 +1069,34 @@ def write_debug_note_to_worklog_folder(project, title, markdown_content, extra_t
     return ""
 
 
-def build_debug_markdown_from_extracted_batches(project_name, week_info, extracted_batches):
-    parts = [
-        f"# 🧪 {project_name} 周报结构化抽取调试",
-        f"**日期范围：** {week_info['start_date']} 至 {week_info['end_date']} | **周数：** 第 {week_info['week_number']} 周",
-        ""
-    ]
+# def build_debug_markdown_from_extracted_batches(project_name, week_info, extracted_batches):
+#     parts = [
+#         f"# 🧪 {project_name} 周报结构化抽取调试",
+#         f"**日期范围：** {week_info['start_date']} 至 {week_info['end_date']} | **周数：** 第 {week_info['week_number']} 周",
+#         ""
+#     ]
 
-    for idx, batch_result in enumerate(extracted_batches, 1):
-        parts.append(f"## Batch {idx}")
-        parts.append("```json")
-        parts.append(json.dumps(batch_result, ensure_ascii=False, indent=2))
-        parts.append("```")
-        parts.append("")
+#     for idx, batch_result in enumerate(extracted_batches, 1):
+#         parts.append(f"## Batch {idx}")
+#         parts.append("```json")
+#         parts.append(json.dumps(batch_result, ensure_ascii=False, indent=2))
+#         parts.append("```")
+#         parts.append("")
 
-    return "\n".join(parts)
+#     return "\n".join(parts)
 
 
-def build_debug_markdown_from_merged_json(project_name, week_info, merged_json):
-    parts = [
-        f"# 🧪 {project_name} 周报结构化聚合调试",
-        f"**日期范围：** {week_info['start_date']} 至 {week_info['end_date']} | **周数：** 第 {week_info['week_number']} 周",
-        "",
-        "```json",
-        json.dumps(merged_json, ensure_ascii=False, indent=2),
-        "```",
-        ""
-    ]
-    return "\n".join(parts)
+# def build_debug_markdown_from_merged_json(project_name, week_info, merged_json):
+#     parts = [
+#         f"# 🧪 {project_name} 周报结构化聚合调试",
+#         f"**日期范围：** {week_info['start_date']} 至 {week_info['end_date']} | **周数：** 第 {week_info['week_number']} 周",
+#         "",
+#         "```json",
+#         json.dumps(merged_json, ensure_ascii=False, indent=2),
+#         "```",
+#         ""
+#     ]
+#     return "\n".join(parts)
 
 # =============================================================================
 # Step 2C: extracted merged json -> markdown
@@ -1207,6 +1218,14 @@ def generate_weekly_summary_from_structured_markdown(structured_markdown, weekly
 
     prompt_text = load_prompt_text(prompt_file_guid, default_prompt)
     user_content = prompt_text.replace("{{markdown_content}}", structured_markdown)
+
+    print(
+        f"[Step 3 Summary][{project_name}] LLM输入统计: "
+        f"chars={len(user_content)}, "
+        f"bytes={len(user_content.encode('utf-8'))}, "
+        f"lines={user_content.count(chr(10)) + 1}"
+    )
+
 
     context_messages = [
         {
@@ -1650,14 +1669,14 @@ for project in projects:
             continue
 
         # Debug 1: raw weekly json 写回日报目录
-        if project.get("weekly_write_debug_note", True):
-            raw_debug_md = build_debug_markdown_from_weekly_json(project_name, weekly_json)
-            write_debug_note_to_worklog_folder(
-                project,
-                build_debug_note_title(week_info, project_name, "raw-json"),
-                raw_debug_md,
-                extra_tags=["raw-json"]
-            )
+        # if project.get("weekly_write_debug_note", True):
+        #     raw_debug_md = build_debug_markdown_from_weekly_json(project_name, weekly_json)
+        #     write_debug_note_to_worklog_folder(
+        #         project,
+        #         build_debug_note_title(week_info, project_name, "raw-json"),
+        #         raw_debug_md,
+        #         extra_tags=["raw-json"]
+        #     )
 
         users = weekly_json.get("users", [])
         if not users:
@@ -1684,16 +1703,16 @@ for project in projects:
         print(f"[Step 2A][{project_name}] 📦 结构化抽取 JSON 已生成: {extracted_json_path}")
 
         # Debug 2: extracted batches 写回日报目录
-        if project.get("weekly_write_debug_note", True):
-            extracted_debug_md = build_debug_markdown_from_extracted_batches(
-                project_name, week_info, all_extracted_results
-            )
-            write_debug_note_to_worklog_folder(
-                project,
-                build_debug_note_title(week_info, project_name, "extracted-json"),
-                extracted_debug_md,
-                extra_tags=["extracted-json"]
-            )
+        # if project.get("weekly_write_debug_note", True):
+        #     extracted_debug_md = build_debug_markdown_from_extracted_batches(
+        #         project_name, week_info, all_extracted_results
+        #     )
+        #     write_debug_note_to_worklog_folder(
+        #         project,
+        #         build_debug_note_title(week_info, project_name, "extracted-json"),
+        #         extracted_debug_md,
+        #         extra_tags=["extracted-json"]
+            # )
 
         # Step 2B: 合并 batch json
         merged_extracted_json = merge_extracted_batches_json(all_extracted_results)
@@ -1708,16 +1727,16 @@ for project in projects:
         print(f"[Step 2B][{project_name}] 📦 合并结构化 JSON 已生成: {merged_json_path}")
 
         # Debug 3: merged json 写回日报目录
-        if project.get("weekly_write_debug_note", True):
-            merged_debug_md = build_debug_markdown_from_merged_json(
-                project_name, week_info, merged_extracted_json
-            )
-            write_debug_note_to_worklog_folder(
-                project,
-                build_debug_note_title(week_info, project_name, "merged-json"),
-                merged_debug_md,
-                extra_tags=["merged-json"]
-            )
+        # if project.get("weekly_write_debug_note", True):
+        #     merged_debug_md = build_debug_markdown_from_merged_json(
+        #         project_name, week_info, merged_extracted_json
+        #     )
+        #     write_debug_note_to_worklog_folder(
+        #         project,
+        #         build_debug_note_title(week_info, project_name, "merged-json"),
+        #         merged_debug_md,
+        #         extra_tags=["merged-json"]
+            # )
 
         # Step 2C: merged json -> markdown（插入 metadata）
         structured_markdown = build_structured_markdown_from_json(
@@ -1736,13 +1755,13 @@ for project in projects:
         print(f"[Step 2C][{project_name}] 📝 结构化 Markdown 已生成: {structured_md_path}")
 
         # Debug 4: structured markdown 写回日报目录
-        if project.get("weekly_write_debug_note", True):
-            write_debug_note_to_worklog_folder(
-                project,
-                build_debug_note_title(week_info, project_name, "structured-md"),
-                structured_markdown,
-                extra_tags=["structured-md"]
-            )
+        # if project.get("weekly_write_debug_note", True):
+        #     write_debug_note_to_worklog_folder(
+        #         project,
+        #         build_debug_note_title(week_info, project_name, "structured-md"),
+        #         structured_markdown,
+        #         extra_tags=["structured-md"]
+        #     )
 
         # Step 3: structured markdown -> final summary
         final_weekly_markdown = generate_weekly_summary_from_structured_markdown(
