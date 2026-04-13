@@ -148,7 +148,6 @@ def _convert_special_nodes(content):
         content
     )
 
-    # 普通 markdown 链接 -> HTML 链接
     content = re.sub(
         r"\[([^\]]+)\]\((https?://[^)\s]+)\)",
         lambda m: f'<a href="{m.group(2)}">{m.group(1)}</a>',
@@ -301,12 +300,6 @@ def build_weekly_note_title(week_info, project_name):
     return f"{year}#W{week_number:02d} {project_name}周报"
 
 
-# def build_debug_note_title(week_info, project_name, debug_type):
-#     year = week_info["start_date"][:4]
-#     week_number = week_info["week_number"]
-#     return f"{year}#{week_number} {project_name}周报调试-{debug_type}"
-
-
 def build_text_block(block_type, text, mentions=None):
     return {
         "type": block_type,
@@ -324,15 +317,6 @@ def build_table_block(table_headers, table_rows):
 
 
 def mention_to_markdown(mention_obj):
-    """
-    完整 mention 对象 -> markdown mention
-    输入:
-    {
-      "type": "mention",
-      "attrs": {...}
-    }
-    或 attrs 本体
-    """
     if not mention_obj:
         return "[@未知](mention::)"
 
@@ -588,7 +572,7 @@ def aggregate_weekly_json(parsed_note_entries):
             })
 
         final_users.append({
-            "user_name": user_data["user_name"],  # 全量保留 mention
+            "user_name": user_data["user_name"],
             "reports": reports
         })
 
@@ -606,50 +590,6 @@ def aggregate_weekly_json(parsed_note_entries):
         },
         "users": final_users
     }
-
-
-# def build_debug_markdown_from_weekly_json(project_name, weekly_json):
-#     metadata = weekly_json.get("metadata", {})
-#     users = weekly_json.get("users", [])
-#     source_urls = metadata.get("source_urls", {})
-#     range_dates = metadata.get("range_dates", [])
-#     week_number = metadata.get("week_number", "")
-
-#     start_date = range_dates[0] if range_dates else ""
-#     end_date = range_dates[-1] if range_dates else ""
-
-#     parts = [
-#         f"# 📊 {project_name} 周报原始聚合调试",
-#         f"**日期范围：** {start_date} 至 {end_date} | **周数：** 第 {week_number} 周",
-#         "**源日报链接：**"
-#     ]
-
-#     for report_date in sorted(source_urls.keys()):
-#         source_url = source_urls.get(report_date, "")
-#         parts.append(f"- {report_date}: [{source_url}]({source_url})")
-
-#     parts.append("")
-#     parts.append("---")
-#     parts.append("")
-    
-
-#     for user in users:
-#         parts.append(f"## 👤 {mention_to_markdown(user.get('user_name'))}")
-#         for report in user.get("reports", []):
-#             parts.append(f"### {report.get('date', '')}")
-#             content = report.get("content", "").strip()
-#             if content:
-#                 for line in content.splitlines():
-#                     line = line.strip()
-#                     if line:
-#                         parts.append(f"- {line}")
-#             else:
-#                 parts.append("- （当日无正文内容）")
-#             parts.append("")
-#         parts.append("---")
-#         parts.append("")
-
-#     return "\n".join(parts)
 
 
 def step1_weekly_summary_note(project):
@@ -967,13 +907,9 @@ def extract_structured_topics_from_batch(users_batch, project):
     return extracted_data
 
 # =============================================================================
-# Step 2B: 聚合 batch 抽取结果（不再做复杂归并，只做合并）
+# Step 2B: 聚合 batch 抽取结果
 # =============================================================================
 def merge_extracted_batches_json(all_extracted_results):
-    """
-    直接把各 batch 的 users 合并成一个总 JSON
-    保留模型抽取后的完整结构
-    """
     merged_users = []
 
     for batch_result in all_extracted_results:
@@ -985,21 +921,431 @@ def merge_extracted_batches_json(all_extracted_results):
     }
 
 # =============================================================================
+# Step 2B': 按项目重组（核心新逻辑）
+# =============================================================================
+_PROJECT_NAME_SUFFIXES = ["模块", "系统", "项目", "开发", "建设", "优化", "改造", "升级"]
+
+def _normalize_project_name(name):
+    name = (name or "").strip()
+    for suffix in _PROJECT_NAME_SUFFIXES:
+        if name.endswith(suffix) and len(name) > len(suffix):
+            name = name[:-len(suffix)].strip()
+    return name
+
+
+def reorganize_by_project(merged_extracted_json):
+    users = merged_extracted_json.get("users", [])
+
+    project_map = {}
+
+    for user in users:
+        mention_obj = user.get("mention", {})
+        topics = user.get("topics", [])
+
+        for topic in topics:
+            topic_name = (topic.get("name") or "未分类").strip()
+            normalized = _normalize_project_name(topic_name)
+
+            if normalized not in project_map:
+                project_map[normalized] = {
+                    "project_name": topic_name,
+                    "name_source": topic.get("name_source", "inferred"),
+                    "members": []
+                }
+            else:
+                if topic.get("name_source") == "explicit":
+                    project_map[normalized]["project_name"] = topic_name
+                    project_map[normalized]["name_source"] = "explicit"
+
+            project_map[normalized]["members"].append({
+                "mention": mention_obj,
+                "progress": (topic.get("progress") or "").strip(),
+                "risk": (topic.get("risk") or "").strip(),
+                "help": (topic.get("help") or "").strip(),
+                "next_focus": (topic.get("next_focus") or "").strip(),
+            })
+
+    sorted_projects = sorted(
+        project_map.values(),
+        key=lambda p: p["project_name"]
+    )
+
+    print(f"    [reorganize_by_project] 归一化前项目数: {len(project_map)}, 归一化后: {len(sorted_projects)}")
+
+    return {"projects": sorted_projects}
+
+# =============================================================================
+# Step 2C': 按项目分批渲染 Markdown
+# =============================================================================
+def split_projects_into_batches(projects, max_projects_per_batch=20):
+    batches = []
+    for i in range(0, len(projects), max_projects_per_batch):
+        batches.append(projects[i:i + max_projects_per_batch])
+    return batches
+
+
+def build_project_batch_markdown(batch, project_config):
+    pm_guids = set()
+    raw_pms = project_config.get("pm_guid")
+    if raw_pms:
+        if isinstance(raw_pms, list):
+            pm_guids.update(raw_pms)
+        elif isinstance(raw_pms, str):
+            pm_guids.add(raw_pms)
+
+    parts = []
+
+    for proj in batch:
+        proj_name = proj.get("project_name", "未分类")
+
+        parts.append(f"# 📌 {proj_name}")
+        parts.append("")
+
+        for member in proj.get("members", []):
+            mention_obj = member.get("mention", {})
+            name_md = mention_to_markdown(mention_obj)
+
+            user_id = (mention_obj.get("attrs") or {}).get("id", "")
+            is_pm = user_id in pm_guids
+
+            pm_tag = " **项目负责人**" if is_pm else ""
+            parts.append(f"## 👤 {name_md}{pm_tag}")
+
+            progress = member.get("progress", "")
+            risk = member.get("risk", "")
+            help_text = member.get("help", "")
+            next_focus = member.get("next_focus", "")
+
+            if progress:
+                parts.append(f"- **进展：** {progress}")
+            if risk:
+                parts.append(f"- **风险：** {risk}")
+            if help_text:
+                parts.append(f"- **协助：** {help_text}")
+            if next_focus:
+                parts.append(f"- **下周重点：** {next_focus}")
+
+            if not any([progress, risk, help_text, next_focus]):
+                parts.append("- （该主题暂无可结构化内容）")
+
+            parts.append("")
+
+        parts.append("---")
+        parts.append("")
+
+    return "\n".join(parts)
+
+# =============================================================================
+# Step 3: 按项目分批 LLM 生成（✅/❗/🙌，不生成🎉）
+# =============================================================================
+def process_summary_batch(batch_idx, total_batches, batch_md, project):
+    project_name = project.get("project_name", "Unknown")
+    print(f"    [Summary Batch {batch_idx}/{total_batches}][{project_name}] 开始处理...")
+    result = generate_project_batch_summary(batch_md, project)
+    print(f"    [Summary Batch {batch_idx}/{total_batches}][{project_name}] ✅ 处理完成")
+    return batch_idx, result
+
+
+def generate_project_batch_summary(batch_markdown, project):
+    prompt_file_guid = project.get("weekly_summary_prompt_file_guid")
+
+    default_prompt = """请基于以下按项目汇总的周报结构化内容，按指定格式输出周报。
+
+# 输出结构（严格遵守）
+
+### ✅ 本周核心进展
+按**项目大分类**组织。每个分类下，直接列出具体事项。
+- **强制规则**：每条事项必须以 `[@姓名](mention:uid:id)` 开头。
+- **风格**：动词开头（紧跟人名后），描述具体动作和结果，无废话。
+- **覆盖规则**：必须尽可能覆盖输入中所有明确存在的进展主题，即使某主题内容很少也必须保留。
+- **不得为了简洁，把多个原本独立的主题合并成一个抽象大类。**
+- **若某主题只有 1 条进展，也必须单独保留，不得并入其他主题。**
+
+输出形式：
+- **{项目大分类 A}**
+  * [@姓名](mention:uid:id) 完成了 XX 模块接口开发，已通过单元测试。
+  * [@姓名](mention:uid:id) 修复了 XX 场景下的数据异常问题。
+- **{项目大分类 B}**
+  * [@姓名](mention:uid:id) 启动了 XX 算法的训练任务，当前进度 50%。
+
+### ❗ 困难风险及所需支持
+若有困难/风险和所需的外部/内部支持：按项目分类列出。
+- **强制规则**：每条必须以 `[@姓名](mention:uid:id)` 开头，指明相关责任人或受影响人。
+- **描述**：客观描述阻塞现象及对进度的潜在影响，不带情绪。
+- 仅列出输入中明确存在的风险、困难、阻塞项，不要推断影响程度。
+- 若无明确困难，输出一行：本周无阻塞性困难。
+
+输出形式（仅当有实际困难时才显示分类层级）：
+- **{项目大分类 A}**
+  * [@姓名](mention:uid:id) 负责的 XX 模块因依赖方接口未就绪，联调工作暂时阻塞。
+
+### 🙌 Next Key Focus
+仅列出需要未来的工作计划和项目重心。
+- **强制规则**：每条必须以 `[@姓名](mention:uid:id)` 开头，指明提出需求的人。
+- **内容**：清晰说明未来的工作方向。
+- 若无此类事项，输出一行：按既定路线图推进中。
+
+输出形式（仅当有实际未来工作重心和计划时才显示分类层级）：
+- **{项目大分类 A}**
+  * [@姓名](mention:uid:id) 计划本周完成支付模块灰度发布。
+
+# 其他要求
+1. 不要输出"日期范围 / 周数 / 源日报链接"这类头部元信息，由系统补充
+2. 不要输出"本周关键进展"摘要段落，由系统单独生成
+3. 语言要精炼、专业、适合团队同步
+4. 输出 Markdown
+
+输入内容：
+{{markdown_content}}
+"""
+
+    prompt_text = load_prompt_text(prompt_file_guid, default_prompt)
+    user_content = prompt_text.replace("{{markdown_content}}", batch_markdown)
+
+    context_messages = [
+        {
+            "role": "system",
+            "content": "你是专业的项目周报总结助手，请按指定格式输出 Markdown 周报正文。按项目维度组织内容。",
+            "variables": []
+        },
+        {
+            "role": "user",
+            "content": user_content,
+            "variables": []
+        }
+    ]
+
+    llm_result = _call_llm_with_retry(
+        llm_name=model.llm_name,
+        llm_params=model.llm_params,
+        context_messages=context_messages,
+        max_retries=10
+    )
+
+    return strip_markdown_wrapper(llm_result)
+
+
+def generate_project_summaries_in_parallel(batch_markdowns, project, max_parallel=50):
+    project_name = project.get("project_name", "Unknown")
+    total_batches = len(batch_markdowns)
+
+    if total_batches == 0:
+        return []
+
+    actual_parallel = min(max_parallel, total_batches)
+
+    print(f"[Step 3][{project_name}] 开始按项目分批生成周报，共 {total_batches} 批，并行数: {actual_parallel}")
+
+    indexed_results = {}
+
+    with ThreadPoolExecutor(max_workers=actual_parallel) as executor:
+        future_to_idx = {
+            executor.submit(process_summary_batch, idx, total_batches, batch_md, project): idx
+            for idx, batch_md in enumerate(batch_markdowns, 1)
+        }
+
+        for future in as_completed(future_to_idx):
+            batch_idx = future_to_idx[future]
+            try:
+                finished_idx, result = future.result()
+                indexed_results[finished_idx] = result
+            except Exception as e:
+                print(f"    [Summary Batch {batch_idx}/{total_batches}] ❌ 处理失败: {e}")
+                raise
+
+    return [indexed_results[i] for i in range(1, total_batches + 1)]
+
+# =============================================================================
+# Step 3': 聚合 + 生成🎉 + 拼接最终 Markdown
+# =============================================================================
+def _classify_section(line):
+    stripped = line.strip()
+    if not stripped.startswith("#"):
+        return None
+
+    text = re.sub(r'[^\w\u4e00-\u9fff]', '', stripped).lower()
+    if "核心进展" in text or "本周进展" in text:
+        return "progress"
+    if "困难" in text or "风险" in text or "所需支持" in text:
+        return "issues"
+    if "nextkeyfocus" in text or "nextfocus" in text or "下一步" in text or "keyfocus" in text:
+        return "help"
+    if "关键进展" in text:
+        return "key_summary"
+    return None
+
+
+def _parse_sections_from_batch_output(batch_output):
+    sections = {"progress": [], "issues": [], "help": []}
+
+    current_section = None
+    for line in batch_output.split("\n"):
+        classified = _classify_section(line)
+        if classified:
+            current_section = classified if classified in sections else None
+            continue
+
+        if current_section:
+            sections[current_section].append(line)
+
+    return sections
+
+
+def aggregate_batch_summaries(batch_summaries):
+    all_progress = []
+    all_issues = []
+    all_help = []
+
+    for batch_output in batch_summaries:
+        sections = _parse_sections_from_batch_output(batch_output)
+
+        progress_text = "\n".join(sections["progress"]).strip()
+        if progress_text:
+            all_progress.append(progress_text)
+
+        issues_text = "\n".join(sections["issues"]).strip()
+        if issues_text:
+            all_issues.append(issues_text)
+
+        help_text = "\n".join(sections["help"]).strip()
+        if help_text:
+            all_help.append(help_text)
+
+    return {
+        "progress": "\n\n".join(all_progress),
+        "issues": "\n\n".join(all_issues),
+        "help": "\n\n".join(all_help),
+    }
+
+
+def generate_key_summary(progress_content, project):
+    prompt_file_guid = project.get("weekly_key_summary_prompt_file_guid")
+
+    default_prompt = """请基于以下"本周核心进展"内容，用一段 80~120 字的客观、平实的文字宏观总结本周整体进度。
+
+要求：
+1. 仅陈述里程碑达成情况、整体健康度。
+2. 严禁使用"表现优异"、"进展神速"等主观评价。
+3. 这一段必须来自输入中已有的"核心进展"归纳，不允许额外创造事实。
+4. 不要写空泛评价，不要写"整体进展顺利/符合预期/状态良好"等未在输入中明确出现的判断。
+5. 若全员无实质进展，写"本周暂无核心产出"。
+6. 只输出一段文字，不要加标题，不要加 Markdown 格式。
+
+输入内容：
+{{progress_content}}
+"""
+
+    prompt_text = load_prompt_text(prompt_file_guid, default_prompt)
+    user_content = prompt_text.replace("{{progress_content}}", progress_content)
+
+    context_messages = [
+        {
+            "role": "system",
+            "content": "你是周报摘要生成助手，请输出一段客观精炼的总结文字，80~150字。",
+            "variables": []
+        },
+        {
+            "role": "user",
+            "content": user_content,
+            "variables": []
+        }
+    ]
+
+    llm_result = _call_llm_with_retry(
+        llm_name=model.llm_name,
+        llm_params=model.llm_params,
+        context_messages=context_messages,
+        max_retries=10
+    )
+
+    return strip_markdown_wrapper(llm_result)
+
+
+def build_final_markdown(weekly_json, aggregated_sections, key_summary):
+    metadata = weekly_json.get("metadata", {})
+    range_dates = metadata.get("range_dates", [])
+    source_urls = metadata.get("source_urls", {})
+    week_number = metadata.get("week_number", "")
+
+    start_date = range_dates[0] if range_dates else ""
+    end_date = range_dates[-1] if range_dates else ""
+
+    header_parts = [
+        f"**日期范围：** {start_date} 至 {end_date} | **周数：** 第 {week_number} 周",
+        "",
+        "**源日报链接：**"
+    ]
+
+    for report_date in sorted(source_urls.keys()):
+        source_url = source_urls.get(report_date, "")
+        header_parts.append(f"- {report_date}: [{source_url}]({source_url})")
+
+    header_parts.append("")
+    header_parts.append("---")
+    header_parts.append("")
+
+    parts = list(header_parts)
+
+    parts.append("### 🎉 团队关键进展")
+    parts.append(key_summary)
+    parts.append("")
+
+    if aggregated_sections["progress"]:
+        parts.append("### ✅ 本周核心进展")
+        parts.append(aggregated_sections["progress"])
+        parts.append("")
+
+    if aggregated_sections["issues"]:
+        parts.append("### ❗ 困难风险及所需支持")
+        parts.append(aggregated_sections["issues"])
+        parts.append("")
+
+    if aggregated_sections["help"]:
+        parts.append("### 🙌 Next Key Focus")
+        parts.append(aggregated_sections["help"])
+        parts.append("")
+
+    return "\n".join(parts)
+
+# =============================================================================
 # Debug: 写回 work log folder
 # =============================================================================
-def insert_markdown_to_note(user_guid, note_guid, markdown_content):
+def _request_with_retry(method, url, max_retries=3, **kwargs):
+    kwargs.setdefault("timeout", 30)
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            if method == "post":
+                response = requests.post(url, **kwargs)
+            else:
+                response = requests.get(url, **kwargs)
+            return response
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            last_error = e
+            if attempt < max_retries:
+                wait = min(2 ** attempt, 10)
+                print(f"    ⚠️ {url.split('/')[-1]} 第 {attempt} 次请求失败: {e}, {wait}s 后重试...")
+                time.sleep(wait)
+            else:
+                raise last_error
+
+
+def insert_markdown_to_note(user_guid, note_guid, markdown_content, max_retries=3):
     clean_content = strip_markdown_wrapper(markdown_content)
     html_content = _convert_special_nodes(clean_content)
 
-    response = requests.post(
+    response = _request_with_retry(
+        "post",
         BASE_URL + MD_INSERT_ROUTE,
+        max_retries=max_retries,
         headers=get_headers_with_ak(user_guid=user_guid),
         json={
             "note_guid": note_guid,
             "markdown_content": html_content,
             "mode": "w",
             "location": 1
-        }
+        },
+        timeout=60
     )
 
     if response.status_code != 200:
@@ -1016,8 +1362,10 @@ def create_note_api(content, title, project_guid, parent_guid, tags, creator_gui
     if not project_guid:
         raise ValueError("target_project_guid 不能为空！")
 
-    response = requests.post(
+    response = _request_with_retry(
+        "post",
         BASE_URL + WORKSPACE_SAVE_ROUTE,
+        max_retries=3,
         headers=headers,
         json={
             "project_guid": project_guid,
@@ -1036,8 +1384,19 @@ def create_note_api(content, title, project_guid, parent_guid, tags, creator_gui
         raise Exception(f"创建笔记 API 返回错误: {response_json}")
 
     doc_id = response_json.get("data", {}).get("guid")
-    if doc_id:
-        insert_markdown_to_note(creator_guid, doc_id, content)
+
+    if doc_id and content:
+        try:
+            insert_markdown_to_note(creator_guid, doc_id, content, max_retries=5)
+        except Exception as e:
+            print(f"    ⚠️ 笔记已创建(doc_id={doc_id})但内容写入失败: {e}")
+            print(f"    → 将在 5s 后单独重试写入...")
+            time.sleep(5)
+            try:
+                insert_markdown_to_note(creator_guid, doc_id, content, max_retries=5)
+                print(f"    ✅ 重试写入成功")
+            except Exception as e2:
+                print(f"    ❌ 重试写入仍失败: {e2}，笔记已创建但内容为空，doc_id={doc_id}")
 
     return doc_id
 
@@ -1068,217 +1427,45 @@ def write_debug_note_to_worklog_folder(project, title, markdown_content, extra_t
 
     return ""
 
+# =============================================================================
+# Step 4: 创建正式周报笔记
+# =============================================================================
+def create_final_weekly_note(content, project, week_info):
+    try:
+        project_name = project.get("project_name", "")
+        target_project_guid = project.get("weekly_target_project_guid")
+        target_parent_guid = project.get("weekly_target_parent_guid", "0")
+        target_user_guid = project.get("weekly_target_user_guid")
 
-# def build_debug_markdown_from_extracted_batches(project_name, week_info, extracted_batches):
-#     parts = [
-#         f"# 🧪 {project_name} 周报结构化抽取调试",
-#         f"**日期范围：** {week_info['start_date']} 至 {week_info['end_date']} | **周数：** 第 {week_info['week_number']} 周",
-#         ""
-#     ]
+        if not target_project_guid:
+            raise ValueError(f"配置错误: project '{project_name}' 的 weekly_target_project_guid 为空！")
 
-#     for idx, batch_result in enumerate(extracted_batches, 1):
-#         parts.append(f"## Batch {idx}")
-#         parts.append("```json")
-#         parts.append(json.dumps(batch_result, ensure_ascii=False, indent=2))
-#         parts.append("```")
-#         parts.append("")
+        print(f"[Step 4][{project_name}] 正在创建正式周报笔记...")
 
-#     return "\n".join(parts)
+        title = build_weekly_note_title(week_info, project_name)
+        doc_id = create_note_api(
+            content=content,
+            title=title,
+            project_guid=target_project_guid,
+            parent_guid=target_parent_guid,
+            tags=["周报", "AI"],
+            creator_guid=target_user_guid
+        )
 
+        if not doc_id:
+            return [], []
 
-# def build_debug_markdown_from_merged_json(project_name, week_info, merged_json):
-#     parts = [
-#         f"# 🧪 {project_name} 周报结构化聚合调试",
-#         f"**日期范围：** {week_info['start_date']} 至 {week_info['end_date']} | **周数：** 第 {week_info['week_number']} 周",
-#         "",
-#         "```json",
-#         json.dumps(merged_json, ensure_ascii=False, indent=2),
-#         "```",
-#         ""
-#     ]
-#     return "\n".join(parts)
+        note_url = f"{BASE_URL}/workspace/{doc_id}"
+        print(f"[Step 4][{project_name}] ✅ 正式周报笔记创建完成")
+        return [note_url], [title]
+
+    except Exception as e:
+        print(f"[Step 4] ❌ 发生异常: {e}")
+        traceback.print_exc()
+        return [], []
 
 # =============================================================================
-# Step 2C: extracted merged json -> markdown
-# =============================================================================
-def build_structured_markdown_from_json(project_name, weekly_json, merged_extracted_json, project_config):
-    """
-    将：
-    1. 原始 weekly_json 的 metadata
-    2. json->json 后合并结果
-    渲染为 markdown，供最终 summary 使用
-    """
-    metadata = weekly_json.get("metadata", {})
-    users = merged_extracted_json.get("users", [])
-
-    range_dates = metadata.get("range_dates", [])
-    source_urls = metadata.get("source_urls", {})
-    week_number = metadata.get("week_number", "")
-
-    start_date = range_dates[0] if range_dates else ""
-    end_date = range_dates[-1] if range_dates else ""
-
-    pm_guids = set()
-    raw_pms = project_config.get("pm_guid")
-    if raw_pms:
-        if isinstance(raw_pms, list):
-            pm_guids.update(raw_pms)
-        elif isinstance(raw_pms, str):
-            pm_guids.add(raw_pms)
-
-    parts = [
-        f"日期范围： {start_date} 至 {end_date} | 周数： 第 {week_number} 周",
-        "",
-        "源日报链接："
-    ]
-
-    for report_date in sorted(source_urls.keys()):
-        source_url = source_urls.get(report_date, "")
-        parts.append(f"- {report_date}: [{source_url}]({source_url})")
-
-    parts.append("")
-    parts.append("---")
-    parts.append("")
-
-    for user in users:
-        mention_obj = user.get("mention", {})
-        name_md = mention_to_markdown(mention_obj)
-
-        user_id = (mention_obj.get("attrs") or {}).get("id", "")
-        is_pm = user_id in pm_guids
-
-        if is_pm:
-            parts.append(f"## 👤 {name_md} **项目负责人**")
-        else:
-            parts.append(f"## 👤 {name_md}")
-
-        topics = user.get("topics", [])
-        if not topics:
-            parts.append("- （未抽取到明确主题）")
-            parts.append("")
-            parts.append("---")
-            parts.append("")
-            continue
-
-        for topic in topics:
-            topic_name = topic.get("name", "未识别主题")
-            name_source = topic.get("name_source", "")
-            progress = (topic.get("progress") or "").strip()
-            risk = (topic.get("risk") or "").strip()
-            help_text = (topic.get("help") or "").strip()
-            next_focus = (topic.get("next_focus") or "").strip()
-
-            source_text = "原文明确" if name_source == "explicit" else "模型归纳"
-            parts.append(f"### {topic_name}（{source_text}）")
-
-            if progress:
-                parts.append(f"- **进展：** {progress}")
-            if risk:
-                parts.append(f"- **风险：** {risk}")
-            if help_text:
-                parts.append(f"- **协助：** {help_text}")
-            if next_focus:
-                parts.append(f"- **下周重点：** {next_focus}")
-
-            if not any([progress, risk, help_text, next_focus]):
-                parts.append("- （该主题暂无可结构化内容）")
-
-            parts.append("")
-
-        parts.append("---")
-        parts.append("")
-
-    return "\n".join(parts)
-
-# =============================================================================
-# Step 3: markdown -> summary（最终周报）
-# =============================================================================
-def generate_weekly_summary_from_structured_markdown(structured_markdown, weekly_json, project):
-    """
-    Step3:
-    - 用 structured markdown 调用模型生成总结正文
-    - 再把 metadata 头部程序化插入到最终 summary 最前面
-    """
-    project_name = project.get("project_name", "")
-    prompt_file_guid = project.get("weekly_prompt_file_guid")
-
-    default_prompt = """请基于以下周报结构化汇总内容，输出一篇结构清晰、重点明确的项目周报。
-
-要求：
-1. 保留关键进展、风险、协助事项、下周重点
-2. 可以按主题/项目、按优先级组织内容
-3. 语言要精炼、专业、适合团队同步
-4. 输出 Markdown
-5. 不要重复输出“日期范围 / 周数 / 源日报链接”这类头部元信息，这部分由系统补充
-6. 可以适度提炼，不要逐字复述
-
-输入内容：
-{{markdown_content}}
-"""
-
-    prompt_text = load_prompt_text(prompt_file_guid, default_prompt)
-    user_content = prompt_text.replace("{{markdown_content}}", structured_markdown)
-
-    print(
-        f"[Step 3 Summary][{project_name}] LLM输入统计: "
-        f"chars={len(user_content)}, "
-        f"bytes={len(user_content.encode('utf-8'))}, "
-        f"lines={user_content.count(chr(10)) + 1}"
-    )
-
-
-    context_messages = [
-        {
-            "role": "system",
-            "content": "你是专业的项目周报总结助手，请输出结构清晰的 Markdown 格式周报正文。",
-            "variables": []
-        },
-        {
-            "role": "user",
-            "content": user_content,
-            "variables": []
-        }
-    ]
-
-    print(f"[Step 3 Summary][{project_name}] 正在调用 AI 生成最终周报...")
-
-    llm_result = _call_llm_with_retry(
-        llm_name=model.llm_name,
-        llm_params=model.llm_params,
-        context_messages=context_messages,
-        max_retries=10
-    )
-
-    summary_body = strip_markdown_wrapper(llm_result)
-
-    # ===== 程序化插入 metadata 头部 =====
-    metadata = weekly_json.get("metadata", {})
-    range_dates = metadata.get("range_dates", [])
-    source_urls = metadata.get("source_urls", {})
-    week_number = metadata.get("week_number", "")
-
-    start_date = range_dates[0] if range_dates else ""
-    end_date = range_dates[-1] if range_dates else ""
-
-    header_parts = [
-        f"**日期范围：** {start_date} 至 {end_date} | **周数：** 第 {week_number} 周",
-        "",
-        "**源日报链接：**"
-    ]
-
-    for report_date in sorted(source_urls.keys()):
-        source_url = source_urls.get(report_date, "")
-        header_parts.append(f"- {report_date}: [{source_url}]({source_url})")
-
-    header_parts.append("")
-    header_parts.append("---")
-    header_parts.append("")
-
-    final_markdown = "\n".join(header_parts) + summary_body
-    return final_markdown
-
-# =============================================================================
-# Step 2.5: 卡片摘要
+# Step 5: 发送消息
 # =============================================================================
 def generate_card_content(project, long_markdown, week_info=None):
     project_name = project.get("project_name", "")
@@ -1350,57 +1537,11 @@ def generate_card_content(project, long_markdown, week_info=None):
         return summary_prefix + strip_markdown_wrapper(llm_result)
 
     except Exception as e:
-        print(f"⚠️ [Step 2.5][{project_name}] AI 生成在 10 次重试后仍失败 (Error: {e})")
+        print(f"⚠️ [Card][{project_name}] AI 生成在 10 次重试后仍失败 (Error: {e})")
         return summary_prefix + fallback_format_content(card_input_markdown, max_len=20000)
 
-# =============================================================================
-# Step 4: 创建正式周报笔记
-# =============================================================================
-def create_final_weekly_note(content, project, week_info):
-    try:
-        project_name = project.get("project_name", "")
-        target_project_guid = project.get("weekly_target_project_guid")
-        target_parent_guid = project.get("weekly_target_parent_guid", "0")
-        target_user_guid = project.get("weekly_target_user_guid")
 
-        if not target_project_guid:
-            raise ValueError(f"配置错误: project '{project_name}' 的 weekly_target_project_guid 为空！")
-
-        print(f"[Step 4][{project_name}] 正在创建正式周报笔记...")
-
-        title = build_weekly_note_title(week_info, project_name)
-        doc_id = create_note_api(
-            content=content,
-            title=title,
-            project_guid=target_project_guid,
-            parent_guid=target_parent_guid,
-            tags=["周报", "AI"],
-            creator_guid=target_user_guid
-        )
-
-        if not doc_id:
-            return [], []
-
-        note_url = f"{BASE_URL}/workspace/{doc_id}"
-        print(f"[Step 4][{project_name}] ✅ 正式周报笔记创建完成")
-        return [note_url], [title]
-
-    except Exception as e:
-        print(f"[Step 4] ❌ 发生异常: {e}")
-        traceback.print_exc()
-        return [], []
-
-# =============================================================================
-# Step 5: 发送消息
-# =============================================================================
 def build_feishu_card(title, card_content, note_url, source_note_entries=None):
-    """
-    source_note_entries:
-    [
-        {"date": "2026-03-23", "url": "..."},
-        {"date": "2026-03-24", "url": "..."}
-    ]
-    """
     elements = [
         {
             "tag": "markdown",
@@ -1645,7 +1786,7 @@ def step5_send_messages(note_url_list, note_title_list, project, content_list, w
 # 主执行流程
 # =============================================================================
 print("=" * 60)
-print(f"开始执行周报工作流（外部prompt + json->json + json->md->summary）| 项目数: {len(projects)}")
+print(f"开始执行周报工作流（按项目聚合版 v4）| 项目数: {len(projects)}")
 print("=" * 60)
 
 for project in projects:
@@ -1663,20 +1804,12 @@ for project in projects:
 
     try:
         # Step 1: 原始 weekly 聚合 json
-        weekly_json, found, temp_files = step1_weekly_summary_note(project)
+        weekly_json, found, step1_temp_files = step1_weekly_summary_note(project)
+        temp_files.extend(step1_temp_files)
         if not found:
             print(f"  ⚠️ 跳过 {project_name}")
+            cleanup_temp_files(temp_files, project_name=project_name)
             continue
-
-        # Debug 1: raw weekly json 写回日报目录
-        # if project.get("weekly_write_debug_note", True):
-        #     raw_debug_md = build_debug_markdown_from_weekly_json(project_name, weekly_json)
-        #     write_debug_note_to_worklog_folder(
-        #         project,
-        #         build_debug_note_title(week_info, project_name, "raw-json"),
-        #         raw_debug_md,
-        #         extra_tags=["raw-json"]
-        #     )
 
         users = weekly_json.get("users", [])
         if not users:
@@ -1702,18 +1835,6 @@ for project in projects:
         temp_files.append(extracted_json_path)
         print(f"[Step 2A][{project_name}] 📦 结构化抽取 JSON 已生成: {extracted_json_path}")
 
-        # Debug 2: extracted batches 写回日报目录
-        # if project.get("weekly_write_debug_note", True):
-        #     extracted_debug_md = build_debug_markdown_from_extracted_batches(
-        #         project_name, week_info, all_extracted_results
-        #     )
-        #     write_debug_note_to_worklog_folder(
-        #         project,
-        #         build_debug_note_title(week_info, project_name, "extracted-json"),
-        #         extracted_debug_md,
-        #         extra_tags=["extracted-json"]
-            # )
-
         # Step 2B: 合并 batch json
         merged_extracted_json = merge_extracted_batches_json(all_extracted_results)
 
@@ -1726,49 +1847,49 @@ for project in projects:
         temp_files.append(merged_json_path)
         print(f"[Step 2B][{project_name}] 📦 合并结构化 JSON 已生成: {merged_json_path}")
 
-        # Debug 3: merged json 写回日报目录
-        # if project.get("weekly_write_debug_note", True):
-        #     merged_debug_md = build_debug_markdown_from_merged_json(
-        #         project_name, week_info, merged_extracted_json
-        #     )
-        #     write_debug_note_to_worklog_folder(
-        #         project,
-        #         build_debug_note_title(week_info, project_name, "merged-json"),
-        #         merged_debug_md,
-        #         extra_tags=["merged-json"]
-            # )
+        # Step 2B': 按项目重组
+        project_json = reorganize_by_project(merged_extracted_json)
 
-        # Step 2C: merged json -> markdown（插入 metadata）
-        structured_markdown = build_structured_markdown_from_json(
-            project_name=project_name,
-            weekly_json=weekly_json,
-            merged_extracted_json=merged_extracted_json,
-            project_config=project
-        )
-
-        structured_md_path = build_intermediate_markdown_file(
+        project_json_path = build_intermediate_json_file(
             project["project_guid"],
-            f"{week_info['start_date']}_to_{week_info['end_date']}_structured",
-            structured_markdown
+            f"{week_info['start_date']}_to_{week_info['end_date']}",
+            project_json,
+            suffix="by_project"
         )
-        temp_files.append(structured_md_path)
-        print(f"[Step 2C][{project_name}] 📝 结构化 Markdown 已生成: {structured_md_path}")
+        temp_files.append(project_json_path)
+        print(f"[Step 2B'][{project_name}] 📦 按项目重组 JSON 已生成: {project_json_path}")
 
-        # Debug 4: structured markdown 写回日报目录
-        # if project.get("weekly_write_debug_note", True):
-        #     write_debug_note_to_worklog_folder(
-        #         project,
-        #         build_debug_note_title(week_info, project_name, "structured-md"),
-        #         structured_markdown,
-        #         extra_tags=["structured-md"]
-        #     )
+        # Step 2C': 按项目分批渲染 Markdown
+        projects_list = project_json.get("projects", [])
+        max_projects_per_batch = project.get("weekly_summary_batch_size", 20)
+        project_batches = split_projects_into_batches(projects_list, max_projects_per_batch)
 
-        # Step 3: structured markdown -> final summary
-        final_weekly_markdown = generate_weekly_summary_from_structured_markdown(
-            structured_markdown,
-            weekly_json,
-            project
+        batch_markdowns = []
+        for batch_idx, batch in enumerate(project_batches, 1):
+            batch_md = build_project_batch_markdown(batch, project)
+            batch_markdowns.append(batch_md)
+
+            batch_md_path = build_intermediate_markdown_file(
+                project["project_guid"],
+                f"{week_info['start_date']}_to_{week_info['end_date']}_batch{batch_idx}",
+                batch_md
+            )
+            temp_files.append(batch_md_path)
+
+        print(f"[Step 2C'][{project_name}] 📝 已生成 {len(batch_markdowns)} 批项目 Markdown")
+
+        # Step 3: 按项目分批 LLM 生成（✅/❗/🙌）
+        batch_summaries = generate_project_summaries_in_parallel(
+            batch_markdowns, project, max_parallel=max_parallel_batches
         )
+
+        # Step 3': 聚合 + 生成🎉
+        aggregated_sections = aggregate_batch_summaries(batch_summaries)
+
+        key_summary = generate_key_summary(aggregated_sections["progress"], project)
+        print(f"[Step 3'][{project_name}] 🎉 本周关键进展已生成")
+
+        final_weekly_markdown = build_final_markdown(weekly_json, aggregated_sections, key_summary)
 
         final_md_path = build_intermediate_markdown_file(
             project["project_guid"],
