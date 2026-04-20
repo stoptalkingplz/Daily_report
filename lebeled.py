@@ -487,7 +487,7 @@ class DailyReportParser:
                 code_parts.append(item.get("text", ""))
         return self._normalize_text("\n".join(code_parts))
 
-    def _extract_project_info(self, text):
+    def _extract_project_info(self, text, mentions=None):
         text = self._normalize_text(text)
         m = re.match(r"^📌\s*[\[\【](.*?)[\]\】]", text)
         if not m:
@@ -495,12 +495,30 @@ class DailyReportParser:
 
         project_name = m.group(1).strip()
 
-        after_bracket = text[m.end():]
+        after_bracket = text[m.end():].strip() 
         products = []
-        for part in after_bracket.split("@"):
-            part = part.strip()
-            if part:
+        if mentions: 
+            for mention in mentions: 
+                label = mention.get("label", "").strip() 
+                uid = mention.get("uid", "") 
+                user_id = mention.get("id", "") 
+                if label and uid and user_id: 
+                    products.append(f"@{label}")
+
+        plain_parts = re.findall(r"@([^\s@]+)", after_bracket) 
+
+        for part in plain_parts: 
+            part = part.strip() 
+            if part: 
                 products.append(part)
+        
+        deduped = [] 
+        seen = set() 
+        for p in products: 
+            if p and p not in seen: 
+                seen.add(p) 
+                deduped.append(p) 
+                products = deduped
 
         return project_name, products
 
@@ -701,7 +719,7 @@ class DailyReportParser:
                     continue
 
                 # 6) 项目识别：仅在 section 未开始前识别
-                project_name, products = self._extract_project_info(text)
+                project_name, products = self._extract_project_info(text,mentions)
                 if (
                     project_name
                     and current_member
